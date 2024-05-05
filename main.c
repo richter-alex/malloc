@@ -26,45 +26,77 @@ struct Free_List {
 };
 
 struct Free_List free_list = { .heap = NULL, .first_free = NULL, .heap_used = 0 };
-struct Free_List * free_list_ptr = &free_list;
 
 void init_allocator() {
-    free_list_ptr->heap = mmap(NULL, HEAP_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    free_list.heap = mmap(NULL, HEAP_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
 
-    if (free_list_ptr->heap == MAP_FAILED) {
+    if (free_list.heap == MAP_FAILED) {
         printf("mmap failed. errno: %d\n", errno);
         exit(-1);
     }
 
-    free_list_ptr->heap_used = 0;
-    free_list_ptr->first_free = (struct Free_List_Node *)free_list_ptr->heap;
-    free_list_ptr->first_free->size = HEAP_SIZE - sizeof(struct Free_List_Node);
-    free_list_ptr->first_free->next = NULL;
+    free_list.heap_used = 0;
+    free_list.first_free = (struct Free_List_Node *)free_list.heap;
+    free_list.first_free->size = HEAP_SIZE - sizeof(struct Free_List_Node);
+    free_list.first_free->next = NULL;
 }
 
+// When the user requests memory, it searches in the linked list for a block where
+// the data can fit. It then removes the element from the linked list and places an
+// allocation header (which is required on free) just before the data.
+// https://www.gingerbill.org/article/2021/11/30/memory-allocation-strategies-005/
 void * mr_alloc(size_t size) {
-    if (free_list_ptr->heap == NULL)
+    if (free_list.heap == NULL)
         init_allocator();
 
-    struct Free_List_Node * current = free_list_ptr->first_free;
+    struct Free_List_Node * current = free_list.first_free;
+    struct Free_List_Node * next;
+    struct Free_List_Node * previous;
 
-    while (current->size < size) {
-        if (current->next == NULL) {
+    size_t remaining;
+
+    // Find a Free_List_Node with an appropriate size.
+    while (current != NULL) {
+        if (current->size >= size)
+            break;
+
+        if (next == NULL) {
             printf("Free list exhausted. Crash time.\n");
             exit(-1);
         }
+
+        previous = current;
         current = current->next;
     }
 
-    struct Allocation_Header * alloc_header = (struct Allocation_Header *)current;
-    alloc_header->size = size;
-    memset(current + sizeof(struct Allocation_Header), 0, size );
-    free_list_ptr->heap_used += sizeof(struct Allocation_Header) + size;
+    remaining = current->size - size;
 
-    free_list_ptr->first_free = (struct Free_List_Node *)((char *)alloc_header + sizeof(struct Allocation_Header) + size);
-    free_list_ptr->first_free->size = HEAP_SIZE - free_list_ptr->heap_used;
+    // Remove the node from the linked list.
+    if (previous != NULL)
+        previous->next = current->next;
 
-    void * ptr = (char *)alloc_header + sizeof(struct Allocation_Header);
+    // Place an allocation header.
+    struct Allocation_Header alloc_header;
+    alloc_header.size = size;
+    *(struct Allocation_Header *)current = alloc_header;
+
+    memset((char *)current + sizeof(struct Allocation_Header), 0, size);
+    free_list.heap_used += sizeof(struct Allocation_Header) + size;
+
+    // Insert a new node if there's room.
+    if (remaining > 0) {
+        struct Free_List_Node * new_node = (struct Free_List_Node *)((char *)current + sizeof(struct Allocation_Header) + size);
+        new_node->size = remaining;
+
+        if (previous != NULL)
+            previous->next = new_node;
+
+        new_node-> next = next;
+        free_list.first_free = new_node;
+    }
+
+    // Give the people what they want
+    void * ptr = &alloc_header + sizeof(struct Allocation_Header);
 
     return ptr;
 }
@@ -79,23 +111,21 @@ void mr_free(void * ptr) {
 
         struct Free_List_Node fl_node;
         fl_node.size = (size + sizeof(struct Allocation_Header)) - sizeof(struct Free_List_Node);
-        fl_node.next = free_list_ptr->first_free;
+        fl_node.next = free_list.first_free;
         *(struct Free_List_Node *)alloc_ptr = fl_node;
 
-        free_list_ptr->first_free = (struct Free_List_Node *)alloc_ptr;
+        free_list.first_free = (struct Free_List_Node *)alloc_ptr;
 }
 
 int main(int argc, char **argv) {
-    unsigned char * new_alloc = (unsigned char *)mr_alloc(sizeof(unsigned char) * 10);
-    *new_alloc = 1;
-    unsigned char * another_alloc = (unsigned char *)mr_alloc(sizeof(unsigned char) * 10);
-    *another_alloc = 1;
-    unsigned int * yet_another_alloc  = (unsigned int *)mr_alloc(sizeof(unsigned int) * 5);
-    *yet_another_alloc = 128;
+    int * alloc = mr_alloc(sizeof(int) * 2);
+    *alloc = 1;
 
-    mr_free(new_alloc);
-    mr_free(another_alloc);
-    mr_free(yet_another_alloc);
+    int * new_alloc = mr_alloc(sizeof(int) * 2);
+    *new_alloc = 1337;
+
+    int * final_alloc = mr_alloc(sizeof(int) * 2);
+    *final_alloc = 1337;
 
     return 0;
 }
