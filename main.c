@@ -6,12 +6,17 @@
 
 #define HEAP_SIZE 4096
 
+#ifdef WIN32
+#define NULL 0
+#endif
+
 /*
     mmap(NULL, HEAP_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
 */
 
 struct Allocation_Header {
     size_t size;
+    size_t padding;
 };
 
 struct Free_List_Node {
@@ -41,6 +46,28 @@ void init_allocator() {
     free_list.first_free->next = NULL;
 }
 
+void coalesce() {
+    struct Free_List_Node * cursor = free_list.first_free;
+
+    while (cursor != 0) {
+        if ((char *)cursor + sizeof(struct Free_List_Node) + cursor->size == (char *)cursor->next) {
+            if (cursor->next != 0) {
+                struct Free_List_Node * target = cursor->next;
+                size_t target_size = target->size;
+
+                if (cursor->next != NULL)
+                  cursor->next = cursor->next->next;
+
+                cursor->size = cursor->size + target_size + sizeof(struct Free_List_Node);
+                memset(target, 0, target_size + sizeof(struct Free_List_Node));
+                continue;
+            }
+        } else {
+            cursor = cursor->next;
+        }
+    }
+}
+
 // When the user requests memory, it searches in the linked list for a block where
 // the data can fit. It then removes the element from the linked list and places an
 // allocation header (which is required on free) just before the data.
@@ -50,8 +77,8 @@ void * mr_alloc(size_t size) {
         init_allocator();
 
     struct Free_List_Node * current = free_list.first_free;
-    struct Free_List_Node * next;
-    struct Free_List_Node * previous;
+    struct Free_List_Node * next = NULL;
+    struct Free_List_Node * previous = NULL;
 
     size_t remaining;
 
@@ -91,41 +118,59 @@ void * mr_alloc(size_t size) {
         if (previous != NULL)
             previous->next = new_node;
 
-        new_node-> next = next;
+        new_node->next = next;
         free_list.first_free = new_node;
     }
 
     // Give the people what they want
-    void * ptr = &alloc_header + sizeof(struct Allocation_Header);
+    void * ptr = (char *)current + sizeof(struct Allocation_Header);
 
     return ptr;
 }
 
-// Need to approach this one with a fresh mind. Consecutive free() calls and not leaving the linked list in
-// the correct state.
 void mr_free(void * ptr) {
-        struct Allocation_Header * alloc_ptr = (struct Allocation_Header*)ptr - 1;
-        size_t size = alloc_ptr->size;
+    // What the fuck?
+    //struct Allocation_Header alloc_header = *(struct Allocation_Header *)((char *)ptr - sizeof(struct Allocation_Header));
+    struct Allocation_Header alloc_header = *((struct Allocation_Header *)ptr - 1);
+    struct Free_List_Node new_node = { .next = NULL };
+    struct Free_List_Node * cursor = free_list.first_free;
+    struct Free_List_Node * previous = NULL;
 
-        memset(alloc_ptr, 0, size + sizeof(struct Allocation_Header));
+    while (cursor < (struct Free_List_Node *)ptr) {
+        previous = cursor;
+        cursor = cursor->next;
+    }
 
-        struct Free_List_Node fl_node;
-        fl_node.size = (size + sizeof(struct Allocation_Header)) - sizeof(struct Free_List_Node);
-        fl_node.next = free_list.first_free;
-        *(struct Free_List_Node *)alloc_ptr = fl_node;
+    if (previous != NULL)
+        previous->next = (struct Free_List_Node *)(struct Allocation_Header *)((char *)ptr - sizeof(struct Allocation_Header));
+    new_node.next = cursor;
+    new_node.size = alloc_header.size;
 
-        free_list.first_free = (struct Free_List_Node *)alloc_ptr;
+    memset(ptr - sizeof(struct Allocation_Header), 0, alloc_header.size + sizeof(struct Allocation_Header));
+    
+    free_list.heap_used -= new_node.size + sizeof(new_node);
+
+    if ((struct Free_List_Node *)ptr -1 < free_list.first_free)
+      free_list.first_free = (struct Free_List_Node *)((char *)ptr - sizeof(struct Free_List_Node));
+
+    *((struct Free_List_Node *)ptr - 1) = new_node;
+
+    coalesce();
 }
 
-int main(int argc, char **argv) {
+int main(void) {
     int * alloc = mr_alloc(sizeof(int) * 2);
     *alloc = 1;
 
-    int * new_alloc = mr_alloc(sizeof(int) * 2);
+    int * new_alloc = mr_alloc(sizeof(int) * 4);
     *new_alloc = 1337;
 
     int * final_alloc = mr_alloc(sizeof(int) * 2);
     *final_alloc = 1337;
+
+    mr_free(alloc);
+    mr_free(final_alloc);
+    mr_free(new_alloc);
 
     return 0;
 }
